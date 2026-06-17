@@ -71,6 +71,115 @@ async def upload_files(files: List[UploadFile] = File(...), current_user = Depen
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.get("/dashboard/stats")
+async def get_dashboard_stats(current_user = Depends(get_current_user)):
+    """
+    Fetch dashboard metrics for the current user.
+    """
+    if not supabase_client:
+        raise HTTPException(status_code=500, detail="Database connection unavailable.")
+    try:
+        # Get all agents for the current user
+        agents_res = supabase_client.table('agents').select('id', 'status').eq('user_id', current_user.id).execute()
+        agents = agents_res.data or []
+        
+        total_agents = len(agents)
+        active_agents = len([a for a in agents if a.get('status') == 'active'])
+        
+        # Get all agent IDs to query child tables
+        agent_ids = [a['id'] for a in agents]
+        
+        total_sessions = 0
+        total_documents = 0
+        total_chunks = 0
+        
+        if agent_ids:
+            # Get sessions count
+            sessions_res = supabase_client.table('chat_sessions').select('id').in_('agent_id', agent_ids).execute()
+            total_sessions = len(sessions_res.data) if sessions_res.data else 0
+            
+            # Get documents count and sum chunks
+            docs_res = supabase_client.table('agent_documents').select('chunk_count').in_('agent_id', agent_ids).execute()
+            docs = docs_res.data or []
+            total_documents = len(docs)
+            total_chunks = sum([d.get('chunk_count') or 0 for d in docs])
+            
+        return {
+            "success": True,
+            "stats": {
+                "active_agents": active_agents,
+                "total_agents": total_agents,
+                "total_operations": total_sessions,
+                "total_documents": total_documents,
+                "total_chunks": total_chunks
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/dashboard/activities")
+async def get_dashboard_activities(current_user = Depends(get_current_user)):
+    """
+    Fetch recent activities for the current user.
+    """
+    if not supabase_client:
+        raise HTTPException(status_code=500, detail="Database connection unavailable.")
+    try:
+        # Get all agents for the current user
+        agents_res = supabase_client.table('agents').select('id', 'name').eq('user_id', current_user.id).execute()
+        agents = agents_res.data or []
+        agent_ids = [a['id'] for a in agents]
+        agent_name_map = {a['id']: a['name'] for a in agents}
+        
+        activities = []
+        
+        if agent_ids:
+            # Fetch recent documents
+            docs_res = supabase_client.table('agent_documents').select('*').in_('agent_id', agent_ids).order('created_at', desc=True).limit(5).execute()
+            for doc in (docs_res.data or []):
+                activities.append({
+                    "id": f"doc-{doc['id']}",
+                    "type": "upload",
+                    "agent": "Knowledge Base",
+                    "description": f"successfully indexed \"{doc['file_name']}\" ({doc['chunk_count']} chunks)",
+                    "time": doc['created_at'],
+                    "timestamp": doc['created_at']
+                })
+                
+            # Fetch recent chat sessions
+            sessions_res = supabase_client.table('chat_sessions').select('*').in_('agent_id', agent_ids).order('created_at', desc=True).limit(5).execute()
+            for sess in (sessions_res.data or []):
+                agent_name = agent_name_map.get(sess['agent_id'], 'Agent')
+                activities.append({
+                    "id": f"sess-{sess['id']}",
+                    "type": "message",
+                    "agent": agent_name,
+                    "description": f"started a new conversation session: \"{sess['session_name']}\"",
+                    "time": sess['created_at'],
+                    "timestamp": sess['created_at']
+                })
+                
+            # Fetch recent agent creations
+            agents_sorted_res = supabase_client.table('agents').select('*').eq('user_id', current_user.id).order('created_at', desc=True).limit(5).execute()
+            for ag in (agents_sorted_res.data or []):
+                activities.append({
+                    "id": f"agent-{ag['id']}",
+                    "type": "create",
+                    "agent": "System",
+                    "description": f"New agent \"{ag['name']}\" was deployed with status \"{ag['status']}\"",
+                    "time": ag['created_at'],
+                    "timestamp": ag['created_at']
+                })
+                
+        # Sort all activities by timestamp descending
+        activities.sort(key=lambda x: x['timestamp'], reverse=True)
+        # Take top 5
+        activities = activities[:5]
+        
+        return {"success": True, "activities": activities}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.get("/{agent_id}")
 async def get_agent_details(agent_id: str, current_user = Depends(get_optional_user)):
     """
